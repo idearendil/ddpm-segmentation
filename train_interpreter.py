@@ -4,13 +4,16 @@ from tqdm import tqdm
 import json
 import os
 import gc
+import pickle
+import gzip
+import numpy as np
 
 from torch.utils.data import DataLoader
 
 import argparse
 from src.utils import setup_seed, multi_acc
 from src.pixel_classifier import  load_ensemble, compute_iou, predict_labels, save_predictions, save_predictions, pixel_classifier
-from src.datasets import ImageLabelDataset, FeatureDataset, make_transform
+from src.datasets import ImageLabelDataset, FeatureDataset, make_transform, RealtimeLoadingMLPDataset
 from src.feature_extractors import create_feature_extractor, collect_features
 
 from guided_diffusion.guided_diffusion.script_util import model_and_diffusion_defaults, add_dict_to_argparser
@@ -30,8 +33,11 @@ def prepare_data(args):
             args['image_size']
         )
     )
-    X = torch.zeros((len(dataset), *args['dim'][::-1]), dtype=torch.float)
-    y = torch.zeros((len(dataset), *args['dim'][:-1]), dtype=torch.uint8)
+    if args["saving_memory"]:
+        data_num = 0
+    else:
+        X = torch.zeros((len(dataset), *args['dim'][::-1]), dtype=torch.float)
+        y = torch.zeros((len(dataset), *args['dim'][:-1]), dtype=torch.uint8)
 
     if 'share_noise' in args and args['share_noise']:
         rnd_gen = torch.Generator(device=dev()).manual_seed(args['seed'])
@@ -40,23 +46,44 @@ def prepare_data(args):
     else:
         noise = None 
 
-    for row, (img, label) in enumerate(tqdm(dataset)):
+    for row, (img, label) in enumerate(dataset):
         img = img[None].to(dev())
         features = feature_extractor(img, noise=noise)
-        X[row] = collect_features(args, features).cpu()
+        if args["saving_memory"]:
+            X = collect_features(args, features).cpu()
+        else:
+            X[row] = collect_features(args, features).cpu()
         
         for target in range(args['number_class']):
             if target == args['ignore_label']: continue
             if 0 < (label == target).sum() < 20:
                 print(f'Delete small annotation from image {dataset.image_paths[row]} | label {target}')
                 label[label == target] = args['ignore_label']
-        y[row] = label
+        if args["saving_memory"]:
+            y = label
+        else:
+            y[row] = label
+        
+        if args["saving_memory"]:
+            d = X.shape[0]
+            X = X.reshape(d, -1).permute(1, 0)
+            y = y.flatten()
+            for temp_x, temp_y in tqdm(zip(X, y)):
+                if temp_y.item() == args['ignore_label']:
+                    continue
+                data = np.concatenate((temp_x.numpy(), np.array([temp_y.item()], dtype=np.float32)))
+                data_path = os.path.join(args['saving_memory_dir'], 'data_' + str(data_num) + '.npy')
+                np.save(data_path, data)
+                data_num += 1
     
-    d = X.shape[1]
-    print(f'Total dimension {d}')
-    X = X.permute(1,0,2,3).reshape(d, -1).permute(1, 0)
-    y = y.flatten()
-    return X[y != args['ignore_label']], y[y != args['ignore_label']]
+    if args["saving_memory"]:
+        return data_num
+    else:
+        d = X.shape[1]
+        print(f'Total dimension {d}')
+        X = X.permute(1,0,2,3).reshape(d, -1).permute(1, 0)
+        y = y.flatten()
+        return X[y != args['ignore_label']], y[y != args['ignore_label']]
 
 
 def evaluation(args, models):
@@ -100,11 +127,26 @@ def evaluation(args, models):
 
 # Adopted from https://github.com/nv-tlabs/datasetGAN_release/blob/d9564d4d2f338eaad78132192b865b6cc1e26cac/datasetGAN/train_interpreter.py#L434
 def train(args):
-    features, labels = prepare_data(args)
-    train_data = FeatureDataset(features, labels)
+    if args['saving_memory']:
+        if os.path.exists(args['saving_memory_dir'] + '/data_0.npy'):
+            file_list = os.listdir(args['saving_memory_dir'])
+            data_num = len(file_list)
+            print(data_num)
+            train_data = RealtimeLoadingMLPDataset(args['saving_memory_dir'], data_num)
+        else:
+            data_num = prepare_data(args)
+            print(data_num)
+            train_data = RealtimeLoadingMLPDataset(args['saving_memory_dir'], data_num)
+    else:
+        features, labels = prepare_data(args)
+        train_data = FeatureDataset(features, labels)
+    print(len(train_data))
 
     print(f" ********* max_label {args['number_class']} *** ignore_label {args['ignore_label']} ***********")
-    print(f" *********************** Current number data {len(features)} ***********************")
+    if args['saving_memory']:
+        print(f" *********************** Current number data {data_num} ***********************")
+    else:
+        print(f" *********************** Current number data {len(features)} ***********************")
 
     train_loader = DataLoader(dataset=train_data, batch_size=args['batch_size'], shuffle=True, drop_last=True)
 
@@ -125,7 +167,7 @@ def train(args):
         best_loss = 10000000
         stop_sign = 0
         for epoch in range(100):
-            for X_batch, y_batch in train_loader:
+            for X_batch, y_batch in tqdm(train_loader):
                 X_batch, y_batch = X_batch.to(dev()), y_batch.to(dev())
                 y_batch = y_batch.type(torch.long)
 
@@ -189,6 +231,9 @@ if __name__ == '__main__':
     os.makedirs(path, exist_ok=True)
     print('Experiment folder: %s' % (path))
     os.system('cp %s %s' % (args.exp, opts['exp_dir']))
+
+    if opts['saving_memory']:
+        os.makedirs(opts['saving_memory_dir'], exist_ok=True)
 
     # Check whether all models in ensemble are trained 
     pretrained = [os.path.exists(os.path.join(opts['exp_dir'], f'model_{i}.pth')) 

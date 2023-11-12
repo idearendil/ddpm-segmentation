@@ -5,6 +5,8 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 from guided_diffusion.guided_diffusion.image_datasets import _list_image_files_recursively
+import pickle
+import gzip
 
 
 def make_transform(model_type: str, resolution: int):
@@ -146,6 +148,16 @@ class InMemoryImageLabelDataset(Dataset):
         tensor_label = torch.from_numpy(label)
         return tensor_image, tensor_label
 
-
+class RealtimeLoadingMLPDataset(Dataset):
+    def __init__(self, data_dir, data_num):
+        self.data_dir = data_dir
+        self.data_num = data_num
+	
+    def __len__(self):
+        return self.data_num
+    
+    def __getitem__(self, idx):
+        data = np.load(self.data_dir + '/data_' + str(idx) + '.npy')
+        return torch.Tensor(data[:-1]), data[-1]
 
 

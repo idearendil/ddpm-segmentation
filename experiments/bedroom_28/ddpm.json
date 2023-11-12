@@ -22,6 +22,9 @@
   "training_number": 40,
   "testing_number": 20,
 
+  "saving_memory": true,
+  "saving_memory_dir": "pixel_classifiers/bedroom_28/ddpm/data",
+
   "upsample_mode":"bilinear",
   "share_noise": true,
   "input_activations": false
