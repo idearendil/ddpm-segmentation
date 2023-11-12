@@ -7,6 +7,7 @@ from torchvision import transforms
 from guided_diffusion.guided_diffusion.image_datasets import _list_image_files_recursively
 import pickle
 import gzip
+import os
 
 
 def make_transform(model_type: str, resolution: int):
@@ -160,4 +161,37 @@ class RealtimeLoadingMLPDataset(Dataset):
         data = np.load(self.data_dir + '/data_' + str(idx) + '.npy')
         return torch.Tensor(data[:-1]), data[-1]
 
+class RealtimeLoadingCNNDataset(Dataset):
+    def __init__(self, data_dir, data_num, dim):
+        self.data_dir = data_dir
+        self.data_num = data_num
+        self.dim = dim
+	
+    def __len__(self):
+        return self.data_num
+    
+    def __getitem__(self, idx):
+        dx = [-1, 0, 1, -1, 0, 1, -1, 0, 1]
+        dy = [-1, -1, -1, 0, 0, 0, 1, 1, 1]
+        data = []
+        ans = 0
 
+        img_idx = idx // (self.dim[0] * self.dim[1])
+        x = (idx % (self.dim[0] * self.dim[1])) // self.dim[1]
+        y = idx % self.dim[1]
+
+        for i in range(9):
+            data_path = self.data_dir + '/data_' + str(img_idx) + '_' + str(x+dx[i]) + '_' + str(y+dy[i]) + '.npy'
+            if os.path.exists(data_path):
+                temp_data = np.load(data_path)
+            else:
+                temp_data = np.zeros((self.dim[2]+1,), dtype=np.float32)
+            
+            if i == 4:
+                ans = temp_data[-1]
+                data.append(temp_data[:-1])
+            else:
+                data.append(temp_data[-(self.dim[2] // 9) - 1:-1])
+        
+        total_data = np.concatenate(data, axis=0)
+        return torch.Tensor(total_data), ans

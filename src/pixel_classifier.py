@@ -154,7 +154,10 @@ def compute_iou(args, preds, gts, print_per_class_ious=True):
 def load_ensemble(args, device='cpu'):
     models = []
     for i in range(args['model_num']):
-        model_path = os.path.join(args['exp_dir'], f'model_{i}.pth')
+        if args['head_type'] == 'cnn2d':
+            model_path = os.path.join(args['exp_dir'], f'model_cnn2d_{i}.pth')
+        else:
+            model_path = os.path.join(args['exp_dir'], f'model_mlp_{i}.pth')
         state_dict = torch.load(model_path)['model_state_dict']
         model = nn.DataParallel(pixel_classifier(args["number_class"], args['dim'][-1]))
         model.load_state_dict(state_dict)

@@ -18,6 +18,7 @@
   "model_num": 10,
   "batch_size": 64,
   "max_training": 30,
+  "head_type": "cnn2d",
   
   "training_number": 40,
   "testing_number": 20,

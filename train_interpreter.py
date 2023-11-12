@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 import argparse
 from src.utils import setup_seed, multi_acc
 from src.pixel_classifier import  load_ensemble, compute_iou, predict_labels, save_predictions, save_predictions, pixel_classifier
-from src.datasets import ImageLabelDataset, FeatureDataset, make_transform, RealtimeLoadingMLPDataset
+from src.datasets import ImageLabelDataset, FeatureDataset, make_transform, RealtimeLoadingMLPDataset, RealtimeLoadingCNNDataset
 from src.feature_extractors import create_feature_extractor, collect_features
 
 from guided_diffusion.guided_diffusion.script_util import model_and_diffusion_defaults, add_dict_to_argparser
@@ -53,12 +53,14 @@ def prepare_data(args):
             X = collect_features(args, features).cpu()
         else:
             X[row] = collect_features(args, features).cpu()
+
+        if args['head_type'] != 'cnn2d':
+            for target in range(args['number_class']):
+                if target == args['ignore_label']: continue
+                if 0 < (label == target).sum() < 20:
+                    print(f'Delete small annotation from image {dataset.image_paths[row]} | label {target}')
+                    label[label == target] = args['ignore_label']
         
-        for target in range(args['number_class']):
-            if target == args['ignore_label']: continue
-            if 0 < (label == target).sum() < 20:
-                print(f'Delete small annotation from image {dataset.image_paths[row]} | label {target}')
-                label[label == target] = args['ignore_label']
         if args["saving_memory"]:
             y = label
         else:
@@ -68,11 +70,14 @@ def prepare_data(args):
             d = X.shape[0]
             X = X.reshape(d, -1).permute(1, 0)
             y = y.flatten()
-            for temp_x, temp_y in tqdm(zip(X, y)):
-                if temp_y.item() == args['ignore_label']:
-                    continue
+            for idx, (temp_x, temp_y) in enumerate(tqdm(zip(X, y))):
+                if args['head_type'] == 'cnn2d':
+                    data_path = os.path.join(args['saving_memory_dir'], 'data_' + str(row) + '_' + str(idx // args['dim'][1]) + '_' + str(idx % args['dim'][1]) + '.npy')
+                else:
+                    if temp_y.item() == args['ignore_label']:
+                        continue
+                    data_path = os.path.join(args['saving_memory_dir'], 'data_' + str(data_num) + '.npy')
                 data = np.concatenate((temp_x.numpy(), np.array([temp_y.item()], dtype=np.float32)))
-                data_path = os.path.join(args['saving_memory_dir'], 'data_' + str(data_num) + '.npy')
                 np.save(data_path, data)
                 data_num += 1
     
@@ -128,15 +133,20 @@ def evaluation(args, models):
 # Adopted from https://github.com/nv-tlabs/datasetGAN_release/blob/d9564d4d2f338eaad78132192b865b6cc1e26cac/datasetGAN/train_interpreter.py#L434
 def train(args):
     if args['saving_memory']:
-        if os.path.exists(args['saving_memory_dir'] + '/data_0.npy'):
-            file_list = os.listdir(args['saving_memory_dir'])
-            data_num = len(file_list)
+        data_num = len(os.listdir(args['saving_memory_dir']))
+        if data_num > 10:
             print(data_num)
-            train_data = RealtimeLoadingMLPDataset(args['saving_memory_dir'], data_num)
+            if args['head_type'] == 'cnn2d':
+                train_data = RealtimeLoadingCNNDataset(args['saving_memory_dir'], data_num, args['dim'])
+            else:
+                train_data = RealtimeLoadingMLPDataset(args['saving_memory_dir'], data_num)
         else:
             data_num = prepare_data(args)
             print(data_num)
-            train_data = RealtimeLoadingMLPDataset(args['saving_memory_dir'], data_num)
+            if args['head_type'] == 'cnn2d':
+                train_data = RealtimeLoadingCNNDataset(args['saving_memory_dir'], data_num, args['dim'])
+            else:
+                train_data = RealtimeLoadingMLPDataset(args['saving_memory_dir'], data_num)
     else:
         features, labels = prepare_data(args)
         train_data = FeatureDataset(features, labels)
@@ -148,13 +158,16 @@ def train(args):
     else:
         print(f" *********************** Current number data {len(features)} ***********************")
 
-    train_loader = DataLoader(dataset=train_data, batch_size=args['batch_size'], shuffle=True, drop_last=True)
+    train_loader = DataLoader(dataset=train_data, batch_size=args['batch_size'], shuffle=True, drop_last=True, num_workers=8)
 
     print(" *********************** Current dataloader length " +  str(len(train_loader)) + " ***********************")
     for MODEL_NUMBER in range(args['start_model_num'], args['model_num'], 1):
 
         gc.collect()
-        classifier = pixel_classifier(numpy_class=(args['number_class']), dim=args['dim'][-1])
+        if args['head_type'] == 'cnn2d':
+            classifier = pixel_classifier(numpy_class=(args['number_class']), dim=args['dim'][-1]+args['dim'][-1]//9*8)
+        else:
+            classifier = pixel_classifier(numpy_class=(args['number_class']), dim=args['dim'][-1])
         classifier.init_weights()
 
         classifier = nn.DataParallel(classifier).cuda()
@@ -167,7 +180,7 @@ def train(args):
         best_loss = 10000000
         stop_sign = 0
         for epoch in range(100):
-            for X_batch, y_batch in tqdm(train_loader):
+            for X_batch, y_batch in train_loader:
                 X_batch, y_batch = X_batch.to(dev()), y_batch.to(dev())
                 y_batch = y_batch.type(torch.long)
 
@@ -197,9 +210,13 @@ def train(args):
 
             if stop_sign == 1:
                 break
-
-        model_path = os.path.join(args['exp_dir'], 
-                                  'model_' + str(MODEL_NUMBER) + '.pth')
+        
+        if args['head_type'] == 'cnn2d':
+            model_path = os.path.join(args['exp_dir'], 
+                                  'model_cnn2d_' + str(MODEL_NUMBER) + '.pth')
+        else:
+            model_path = os.path.join(args['exp_dir'], 
+                                  'model_mlp_' + str(MODEL_NUMBER) + '.pth')
         MODEL_NUMBER += 1
         print('save to:',model_path)
         torch.save({'model_state_dict': classifier.state_dict()},
@@ -236,7 +253,11 @@ if __name__ == '__main__':
         os.makedirs(opts['saving_memory_dir'], exist_ok=True)
 
     # Check whether all models in ensemble are trained 
-    pretrained = [os.path.exists(os.path.join(opts['exp_dir'], f'model_{i}.pth')) 
+    if opts['head_type'] == 'cnn2d':
+        pretrained = [os.path.exists(os.path.join(opts['exp_dir'], f'model_cnn2d_{i}.pth')) 
+                  for i in range(opts['model_num'])]
+    else:
+        pretrained = [os.path.exists(os.path.join(opts['exp_dir'], f'model_mlp_{i}.pth')) 
                   for i in range(opts['model_num'])]
               
     if not all(pretrained):
