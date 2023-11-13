@@ -156,10 +156,11 @@ def load_ensemble(args, device='cpu'):
     for i in range(args['model_num']):
         if args['head_type'] == 'cnn2d':
             model_path = os.path.join(args['exp_dir'], f'model_cnn2d_{i}.pth')
+            model = nn.DataParallel(pixel_classifier(numpy_class=(args['number_class']), dim=args['dim'][-1]+args['dim'][-1]//9*8))
         else:
             model_path = os.path.join(args['exp_dir'], f'model_mlp_{i}.pth')
+            model = nn.DataParallel(pixel_classifier(args["number_class"], args['dim'][-1]))
         state_dict = torch.load(model_path)['model_state_dict']
-        model = nn.DataParallel(pixel_classifier(args["number_class"], args['dim'][-1]))
         model.load_state_dict(state_dict)
         model = model.module.to(device)
         models.append(model.eval())

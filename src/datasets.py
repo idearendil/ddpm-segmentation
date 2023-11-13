@@ -166,6 +166,8 @@ class RealtimeLoadingCNNDataset(Dataset):
         self.data_dir = data_dir
         self.data_num = data_num
         self.dim = dim
+        self.hash_table = np.load(args['saving_memory_dir'] + '/hash_table.npy')
+        assert(len(self.hash_table) == self.data_num)
 	
     def __len__(self):
         return self.data_num
@@ -176,9 +178,7 @@ class RealtimeLoadingCNNDataset(Dataset):
         data = []
         ans = 0
 
-        img_idx = idx // (self.dim[0] * self.dim[1])
-        x = (idx % (self.dim[0] * self.dim[1])) // self.dim[1]
-        y = idx % self.dim[1]
+        img_idx, x, y = self.hash_table[idx][:]
 
         for i in range(9):
             data_path = self.data_dir + '/data_' + str(img_idx) + '_' + str(x+dx[i]) + '_' + str(y+dy[i]) + '.npy'

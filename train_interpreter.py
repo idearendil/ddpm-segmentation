@@ -35,6 +35,7 @@ def prepare_data(args):
     )
     if args["saving_memory"]:
         data_num = 0
+        hash_table = []
     else:
         X = torch.zeros((len(dataset), *args['dim'][::-1]), dtype=torch.float)
         y = torch.zeros((len(dataset), *args['dim'][:-1]), dtype=torch.uint8)
@@ -54,12 +55,11 @@ def prepare_data(args):
         else:
             X[row] = collect_features(args, features).cpu()
 
-        if args['head_type'] != 'cnn2d':
-            for target in range(args['number_class']):
-                if target == args['ignore_label']: continue
-                if 0 < (label == target).sum() < 20:
-                    print(f'Delete small annotation from image {dataset.image_paths[row]} | label {target}')
-                    label[label == target] = args['ignore_label']
+        for target in range(args['number_class']):
+            if target == args['ignore_label']: continue
+            if 0 < (label == target).sum() < 20:
+                print(f'Delete small annotation from image {dataset.image_paths[row]} | label {target}')
+                label[label == target] = args['ignore_label']
         
         if args["saving_memory"]:
             y = label
@@ -71,15 +71,20 @@ def prepare_data(args):
             X = X.reshape(d, -1).permute(1, 0)
             y = y.flatten()
             for idx, (temp_x, temp_y) in enumerate(tqdm(zip(X, y))):
+                if temp_y.item() == args['ignore_label']:
+                    continue
                 if args['head_type'] == 'cnn2d':
                     data_path = os.path.join(args['saving_memory_dir'], 'data_' + str(row) + '_' + str(idx // args['dim'][1]) + '_' + str(idx % args['dim'][1]) + '.npy')
+                    hash_table.append((row, idx // args['dim'][1], idx % args['dim'][1]))
                 else:
-                    if temp_y.item() == args['ignore_label']:
-                        continue
                     data_path = os.path.join(args['saving_memory_dir'], 'data_' + str(data_num) + '.npy')
                 data = np.concatenate((temp_x.numpy(), np.array([temp_y.item()], dtype=np.float32)))
                 np.save(data_path, data)
                 data_num += 1
+
+    if args['head_type'] == 'cnn2d':
+        hash_table = np.array(hash_table)
+        np.save(args['saving_memory_dir'] + '/hash_table.npy', hash_table)
     
     if args["saving_memory"]:
         return data_num
@@ -108,7 +113,10 @@ def evaluation(args, models):
         noise = torch.randn(1, 3, args['image_size'], args['image_size'], 
                             generator=rnd_gen, device=dev())
     else:
-        noise = None 
+        noise = None
+    
+    dx = [-1, 0, 1, -1, 0, 1, -1, 0, 1]
+    dy = [-1, -1, -1, 0, 0, 0, 1, 1, 1]
 
     preds, gts, uncertainty_scores = [], [], []
     for img, label in tqdm(dataset):        
@@ -117,6 +125,30 @@ def evaluation(args, models):
         features = collect_features(args, features)
 
         x = features.view(args['dim'][-1], -1).permute(1, 0)
+
+        if args['head_type'] == 'cnn2d':
+            x = x.cpu().numpy()
+
+            x_lst = []
+            for idx in range(args['dim'][0] * args['dim'][1]):
+                x_temp_lst = []
+                cor_x = idx // args['dim'][1]
+                cor_y = idx % args['dim'][1]
+
+                for i in range(9):
+                    if i == 4:
+                        x_temp_lst.append(x[(cor_x+dx[i]) * args['dim'][1] + cor_y+dy[i]])
+                        continue
+                    if cor_x+dx[i] < 0 or cor_x+dx[i] >= args['dim'][0] or cor_y+dy[i] < 0  or cor_y+dy[i] >= args['dim'][1]:
+                        x_temp_lst.append(np.zeros((args['dim'][2] // 9,), dtype=np.float32))
+                    else:
+                        x_temp_lst.append(x[(cor_x+dx[i]) * args['dim'][1] + cor_y+dy[i]][-(args['dim'][2] // 9):])
+                
+                x_lst.append(np.concatenate(x_temp_lst, axis=0))
+        
+            x = np.stack(x_lst, axis=0)
+            x = torch.Tensor(x).to(dev())
+
         pred, uncertainty_score = predict_labels(
             models, x, size=args['dim'][:-1]
         )
